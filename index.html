@@ -133,7 +133,7 @@ a, .link-btn{ background:none; border:none; color: var(--brass-light); font-size
   background: rgba(0,0,0,0.18); color: var(--ivory); font-size:0.95rem;
 }
 .text-input:focus, .select-input:focus, .cv-input:focus{ outline:none; border-color: var(--brass); }
-.id-input{ font-family: var(--font-mono); font-size:0.85rem; resize:vertical; line-height:1.4; }
+.code-input{ text-transform:uppercase; letter-spacing:0.2em; font-family: var(--font-mono); text-align:center; font-size:1.1rem; }
 .chip-value-grid{ display:flex; flex-direction:column; gap:8px; }
 .cv-item{ display:flex; align-items:center; gap:10px; font-size:0.9rem; }
 .cv-item span:nth-child(2){ flex:1; }
@@ -422,7 +422,24 @@ a, .link-btn{ background:none; border:none; color: var(--brass-light); font-size
 </head>
 <body>
 <div id="app"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.18.0/firebase-app-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/firebase/12.18.0/firebase-database-compat.js"></script>
 <script>
+/* ============================= FIREBASE ============================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyCfyf4A1QSVjMkdn52okBxSLknZorwekpk",
+  authDomain: "poker-room-ca358.firebaseapp.com",
+  databaseURL: "https://poker-room-ca358-default-rtdb.firebaseio.com",
+  projectId: "poker-room-ca358",
+  storageBucket: "poker-room-ca358.firebasestorage.app",
+  messagingSenderId: "530761900889",
+  appId: "1:530761900889:web:5b833a2bc8191c4c0b6248"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+let roomRef = null;
+let pendingRemoteUpdate = null;
+
 /* ============================= CONSTANTS ============================= */
 const CHIP_COLORS = ['white','red','green','blue','black'];
 const CHIP_LABELS = {white:'White',red:'Red',green:'Green',blue:'Blue',black:'Black'};
@@ -430,6 +447,7 @@ const CHIP_HEX = {white:'#f3ecdd',red:'#c1392b',green:'#2f8f5b',blue:'#2d6a9f',b
 const DEFAULT_CHIP_VALUES = {white:10,red:20,green:50,blue:100,black:500};
 const DEFAULT_BUY_IN_RECIPE = {white:5,red:5,green:3,blue:2,black:0};
 const AVATAR_COLORS = ['#c9a227','#b5654a','#4f8f6e','#3f6e8c','#8a5a83','#b89b5e','#4e8b8b','#a2543c','#7a8a4e','#9c6a3f'];
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /* ============================= STATE ============================= */
 let state = {
@@ -440,18 +458,16 @@ let state = {
   modalData: { newChipValues: {...DEFAULT_CHIP_VALUES}, newBuyInRecipe: {...DEFAULT_BUY_IN_RECIPE} },
   toast: null,
   confettiPlayed: false,
-  pollHandle: null,
   toastTimer: null,
 };
 
 /* ============================= UTILS ============================= */
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
-function extractTableId(input){
-  input = (input||'').trim();
-  const hexMatch = input.match(/[0-9a-fA-F]{20,}/);
-  if(hexMatch) return hexMatch[0];
-  if(input.includes('/')) return input.split('/').filter(Boolean).pop();
-  return input;
+function genRoomCode(){ let c=''; for(let i=0;i<4;i++) c += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return c; }
+function extractRoomId(input){
+  input = (input||'').trim().toUpperCase();
+  const match = input.match(new RegExp(`[${CODE_CHARS}]{4}`));
+  return match ? match[0] : input;
 }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
 function fmt(n){ n = Math.round(n||0); const sign = n<0 ? '-' : ''; return sign + '₹' + Math.abs(n).toLocaleString('en-IN'); }
@@ -515,45 +531,44 @@ function computeSettlements(g){
   return settlements;
 }
 
-/* ============================= STORAGE (jsonblob.com — free, anonymous, no login) ============================= */
-const JSONBLOB_BASE = 'https://jsonblob.com/api/jsonBlob';
-
+/* ============================= STORAGE (Firebase Realtime Database) ============================= */
 async function loadGame(id){
   if(!id) return null;
   try{
-    const res = await fetch(`${JSONBLOB_BASE}/${id}`, { headers:{'Accept':'application/json'} });
-    if(!res.ok) return null;
-    return await res.json();
+    const snap = await db.ref('rooms/'+id).once('value');
+    return snap.exists() ? snap.val() : null;
   }catch(e){ return null; }
 }
-async function createRemoteTable(game){
-  const res = await fetch(JSONBLOB_BASE, {
-    method:'POST',
-    headers:{'Content-Type':'application/json','Accept':'application/json'},
-    body: JSON.stringify(game)
-  });
-  if(!res.ok) throw new Error('create failed: '+res.status);
-  const location = res.headers.get('Location') || '';
-  const id = location.split('/').filter(Boolean).pop();
-  if(!id) throw new Error('no table id returned');
-  return id;
-}
 async function saveGame(){
-  if(!state.game) return;
+  if(!state.game || !roomRef) return;
   state.game.updatedAt = Date.now();
   try{
-    const res = await fetch(`${JSONBLOB_BASE}/${state.game.code}`, {
-      method:'PUT',
-      headers:{'Content-Type':'application/json','Accept':'application/json'},
-      body: JSON.stringify(state.game)
-    });
-    if(!res.ok){
-      flashToast(res.status===429 ? 'Sync busy — will retry shortly' : 'Could not sync — check connection');
-    }
+    await roomRef.set(state.game);
   }catch(e){
     console.error('save failed', e);
     flashToast('Could not sync — check connection');
   }
+}
+function handleRemoteSnapshot(snapshot){
+  const remote = snapshot.val();
+  if(!remote) return;
+  if(state.modal){ pendingRemoteUpdate = remote; return; }
+  applyRemoteUpdate(remote);
+}
+function applyRemoteUpdate(remote){
+  if((remote.updatedAt||0) < (state.game?.updatedAt||0)) return;
+  state.game = remote;
+  if(remote.ended) state.view = 'results';
+  else if(state.view==='results') state.view = 'game';
+  render();
+}
+function attachRoom(id){
+  detachRoom();
+  roomRef = db.ref('rooms/'+id);
+  roomRef.on('value', handleRemoteSnapshot);
+}
+function detachRoom(){
+  if(roomRef){ roomRef.off('value', handleRemoteSnapshot); roomRef = null; }
 }
 
 /* Merge another device's saved state with ours: union actions & players by id
@@ -612,12 +627,19 @@ async function createGame(name, chipValues, buyInRecipe){
     liveChecks: {},
   };
   try{
-    const id = await createRemoteTable(game);
+    let id = null;
+    for(let attempt=0; attempt<6; attempt++){
+      const candidate = genRoomCode();
+      const snap = await db.ref('rooms/'+candidate).once('value');
+      if(!snap.exists()){ id = candidate; break; }
+    }
+    if(!id) throw new Error('could not allocate a room code');
     game.code = id;
+    await db.ref('rooms/'+id).set(game);
     state.game = game;
     state.code = id;
+    attachRoom(id);
     state.view = 'game';
-    startPolling();
     render();
   }catch(e){
     console.error(e);
@@ -626,7 +648,7 @@ async function createGame(name, chipValues, buyInRecipe){
 }
 
 async function joinGame(input){
-  const id = extractTableId(input);
+  const id = extractRoomId(input);
   if(!id){ flashToast('Paste the room ID first'); return; }
   const g = await loadGame(id);
   if(!g){ flashToast('No room found with that ID'); return; }
@@ -634,8 +656,8 @@ async function joinGame(input){
   if(!g.liveChecks) g.liveChecks = {};
   g.code = id;
   state.game = g; state.code = id;
+  attachRoom(id);
   state.view = g.ended ? 'results' : 'game';
-  startPolling();
   render();
 }
 
@@ -705,33 +727,9 @@ async function reopenGame(){
   render();
 }
 function backToLanding(){
-  stopPolling();
-  state = { view:'landing', code:null, game:null, modal:null, modalData:{ newChipValues:{...DEFAULT_CHIP_VALUES}, newBuyInRecipe:{...DEFAULT_BUY_IN_RECIPE} }, toast:null, confettiPlayed:false, pollHandle:null, toastTimer:null };
+  detachRoom();
+  state = { view:'landing', code:null, game:null, modal:null, modalData:{ newChipValues:{...DEFAULT_CHIP_VALUES}, newBuyInRecipe:{...DEFAULT_BUY_IN_RECIPE} }, toast:null, confettiPlayed:false, toastTimer:null };
   render();
-}
-
-/* ============================= POLLING (multi-device sync) ============================= */
-async function pollOnce(){
-  if(state.modal) return;
-  if(!state.code || !state.game) return;
-  const remote = await loadGame(state.code);
-  if(remote && remote.updatedAt > (state.game.updatedAt||0)){
-    state.game = remote;
-    if(remote.ended) state.view = 'results';
-    else if(state.view==='results') state.view = 'game';
-    render();
-  }
-}
-function onVisibilityChange(){ if(document.visibilityState==='visible') pollOnce(); }
-function startPolling(){
-  stopPolling();
-  state.pollHandle = setInterval(pollOnce, 8000);
-  document.addEventListener('visibilitychange', onVisibilityChange);
-}
-function stopPolling(){
-  if(state.pollHandle) clearInterval(state.pollHandle);
-  state.pollHandle=null;
-  document.removeEventListener('visibilitychange', onVisibilityChange);
 }
 
 /* ============================= MODAL LIFECYCLE ============================= */
@@ -750,7 +748,13 @@ function openModal(type, data){
   }
   render();
 }
-function closeModal(){ state.modal=null; state.modalData={}; render(); }
+function closeModal(){
+  state.modal=null; state.modalData={};
+  if(pendingRemoteUpdate){
+    const remote = pendingRemoteUpdate; pendingRemoteUpdate = null;
+    applyRemoteUpdate(remote);
+  } else render();
+}
 
 async function confirmBuyin(){
   const { playerId } = state.modal;
@@ -875,9 +879,9 @@ function viewLanding(){
         </div>
         <div class="landing-card">
           <h2>Join a Room</h2>
-          <p class="card-sub">Already have a room running? Paste the Room ID your host sent you.</p>
+          <p class="card-sub">Already have a room running? Enter the host's Room ID.</p>
           <label class="field-label">Room ID</label>
-          <textarea class="text-input id-input" rows="2" placeholder="Paste the room ID or invite message here" data-action="field-input" data-field="joinCode">${escapeHtml(state.modalData.joinCode||'')}</textarea>
+          <input class="text-input code-input" maxlength="4" placeholder="e.g. 7XQK" data-action="field-input" data-field="joinCode" value="${escapeHtml(state.modalData.joinCode||'')}">
           <button class="btn btn-secondary btn-block" data-action="join-game">Join Room</button>
         </div>
       </div>
@@ -898,7 +902,7 @@ function viewGame(){
         <div class="game-name">${escapeHtml(g.name)}</div>
       </div>
       <div class="rail-mid">
-        <div class="stat"><span class="stat-label">Room</span><button class="code-badge" data-action="open-share" title="Share this room">${g.code.slice(0,8)}… <span class="copy-ico">⧉</span></button></div>
+        <div class="stat"><span class="stat-label">Room</span><button class="code-badge" data-action="open-share" title="Share this room">${g.code} <span class="copy-ico">⧉</span></button></div>
         <div class="stat"><span class="stat-label">Running</span><span class="stat-val">${elapsed}</span></div>
         <div class="stat"><span class="stat-label">Total Buy-ins</span><span class="stat-val mono">${fmt(total)}</span></div>
       </div>
