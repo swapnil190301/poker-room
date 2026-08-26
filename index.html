@@ -569,12 +569,27 @@ function computeSettlements(g){
   return settlements;
 }
 
+/* Firebase's Realtime Database silently drops empty arrays/objects on write —
+   a brand-new room's players:[] and actions:[] literally don't get stored,
+   so they come back as `undefined` and crash anything that reads them.
+   Every game object coming FROM Firebase passes through here first. */
+function normalizeGame(g){
+  if(!g) return g;
+  g.players = Array.isArray(g.players) ? g.players : (g.players ? Object.values(g.players) : []);
+  g.actions = Array.isArray(g.actions) ? g.actions : (g.actions ? Object.values(g.actions) : []);
+  g.finalChips = g.finalChips || {};
+  g.liveChecks = g.liveChecks || {};
+  g.chipValues = g.chipValues || {...DEFAULT_CHIP_VALUES};
+  g.buyInRecipe = g.buyInRecipe || {...DEFAULT_BUY_IN_RECIPE};
+  return g;
+}
+
 /* ============================= STORAGE (Firebase Realtime Database) ============================= */
 async function loadGame(id){
   if(!id) return null;
   try{
     const snap = await db.ref('rooms/'+id).once('value');
-    return snap.exists() ? snap.val() : null;
+    return snap.exists() ? normalizeGame(snap.val()) : null;
   }catch(e){ return null; }
 }
 async function saveGame(){
@@ -590,10 +605,12 @@ async function saveGame(){
 function handleRemoteSnapshot(snapshot){
   const remote = snapshot.val();
   if(!remote) return;
+  normalizeGame(remote);
   if(state.modal){ pendingRemoteUpdate = remote; return; }
   applyRemoteUpdate(remote);
 }
 function applyRemoteUpdate(remote){
+  normalizeGame(remote);
   if((remote.updatedAt||0) < (state.game?.updatedAt||0)) return;
   state.game = remote;
   if(remote.ended) state.view = 'results';
@@ -690,8 +707,6 @@ async function joinGame(input){
   if(!id){ flashToast('Paste the room ID first'); return; }
   const g = await loadGame(id);
   if(!g){ flashToast('No room found with that ID'); return; }
-  if(!g.buyInRecipe) g.buyInRecipe = {...DEFAULT_BUY_IN_RECIPE};
-  if(!g.liveChecks) g.liveChecks = {};
   g.code = id;
   state.game = g; state.code = id;
   attachRoom(id);
