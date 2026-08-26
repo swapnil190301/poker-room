@@ -587,10 +587,8 @@ function normalizeGame(g){
 /* ============================= STORAGE (Firebase Realtime Database) ============================= */
 async function loadGame(id){
   if(!id) return null;
-  try{
-    const snap = await db.ref('rooms/'+id).once('value');
-    return snap.exists() ? normalizeGame(snap.val()) : null;
-  }catch(e){ return null; }
+  const snap = await db.ref('rooms/'+id).once('value'); // let real errors propagate to the caller
+  return snap.exists() ? normalizeGame(snap.val()) : null;
 }
 async function saveGame(){
   if(!state.game || !roomRef) return;
@@ -599,7 +597,7 @@ async function saveGame(){
     await roomRef.set(state.game);
   }catch(e){
     console.error('save failed', e);
-    flashToast('Could not sync — check connection');
+    flashToast('Sync write failed: ' + (e.code || e.message || 'unknown error'));
   }
 }
 function handleRemoteSnapshot(snapshot){
@@ -659,12 +657,18 @@ function mergeGames(remote, local){
    specific change on top, then save — so a slower-polling phone never
    silently erases what someone else just logged. */
 async function mutateAndSave(mutator){
-  const remote = await loadGame(state.game.code);
+  let remote = null;
+  try{
+    remote = await loadGame(state.game.code);
+  }catch(e){
+    console.error('read before mutate failed', e);
+    flashToast('Sync read issue (' + (e.code || e.message || 'unknown') + ') — saved locally');
+  }
   const base = mergeGames(remote, state.game);
   mutator(base);
   state.game = base;
-  await saveGame();
   render();
+  await saveGame();
   return state.game;
 }
 
@@ -698,20 +702,25 @@ async function createGame(name, chipValues, buyInRecipe){
     render();
   }catch(e){
     console.error(e);
-    flashToast('Could not create a room — check your connection and try again');
+    flashToast('Could not create room: ' + (e.code || e.message || 'connection error'));
   }
 }
 
 async function joinGame(input){
   const id = extractRoomId(input);
   if(!id){ flashToast('Paste the room ID first'); return; }
-  const g = await loadGame(id);
-  if(!g){ flashToast('No room found with that ID'); return; }
-  g.code = id;
-  state.game = g; state.code = id;
-  attachRoom(id);
-  state.view = g.ended ? 'results' : 'game';
-  render();
+  try{
+    const g = await loadGame(id);
+    if(!g){ flashToast('No room found with that ID'); return; }
+    g.code = id;
+    state.game = g; state.code = id;
+    attachRoom(id);
+    state.view = g.ended ? 'results' : 'game';
+    render();
+  }catch(e){
+    console.error(e);
+    flashToast('Could not join: ' + (e.code || e.message || 'connection error'));
+  }
 }
 
 async function addPlayer(name){
