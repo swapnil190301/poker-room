@@ -1099,6 +1099,10 @@ function openModal(type, data){
   else if(type==='settings') state.modalData = { chipValues: {...state.game.chipValues}, buyInRecipe: {...recipeOf(state.game)} };
   else if(type==='addplayer') state.modalData = { name:'', code:'', mode: (state.game && state.game.groupCode) ? 'code' : 'guest' };
   else if(type==='addmember') state.modalData = { name:'' };
+  else if(type==='editmember'){
+    const mem = (state.group.members||[]).find(x=>x.id===data.memberId);
+    state.modalData = { memberId: data.memberId, name: mem?mem.name:'', code: mem?mem.code:'' };
+  }
   else if(type==='rename') state.modalData = { name: data.currentName||'' };
   else if(type==='playermenu') state.modalData = {};
   else if(type==='share') state.modalData = {};
@@ -1152,6 +1156,22 @@ async function confirmAddPlayer(){
   }
 }
 async function confirmAddMember(){ await addMember(state.modalData.name); closeModal(); }
+async function confirmEditMember(){
+  const { memberId } = state.modal;
+  const name = (state.modalData.name||'').trim();
+  const code = (state.modalData.code||'').trim();
+  if(!name){ flashToast("Name can't be empty"); return; }
+  if(!code){ flashToast("Code can't be empty"); return; }
+  let conflictName = null;
+  await mutateAndSaveGroup(g=>{
+    const dup = g.members.find(m=>m.id!==memberId && m.code===code);
+    if(dup){ conflictName = dup.name; return; }
+    const m = g.members.find(x=>x.id===memberId);
+    if(m){ m.name = name; m.code = code; }
+  });
+  if(conflictName){ flashToast(`${conflictName} already has that code`); return; }
+  closeModal();
+}
 async function confirmRename(){ await renamePlayer(state.modal.playerId, state.modalData.name); closeModal(); }
 async function confirmLiveCheck(){
   const { playerId } = state.modal;
@@ -1481,6 +1501,7 @@ function viewGroup(){
             <span class="lb-name">${escapeHtml(m.name)}</span>
             <span class="lb-sub">Their code:</span>
             <span class="member-code mono">${escapeHtml(m.code)}</span>
+            <button class="icon-btn ghost" data-action="open-editmember" data-member="${m.id}" title="Edit ${escapeHtml(m.name)}">✎</button>
           </div>`).join('')}
       <div style="padding:12px 16px 4px;"><button class="link-btn" data-action="open-addmember">+ Add member</button></div>
     </div>
@@ -1569,6 +1590,7 @@ function renderModal(){
   else if(m.type==='share') inner = modalShare();
   else if(m.type==='livecheck') inner = modalLiveCheck();
   else if(m.type==='addmember') inner = modalAddMember();
+  else if(m.type==='editmember') inner = modalEditMember();
   return `<div class="overlay"><div class="modal">${inner}</div></div>`;
 }
 function modalBuyin(){
@@ -1796,6 +1818,22 @@ function modalAddMember(){
     <button class="btn btn-primary" data-action="confirm-addmember">Add Member</button>
   </div>`;
 }
+function modalEditMember(){
+  const mem = (state.group.members||[]).find(x=>x.id===state.modal.memberId);
+  if(!mem) return `<div class="modal-body"><p class="modal-note">That member is no longer in the group.</p></div>`;
+  return `
+  <div class="modal-head"><h3>Edit Member</h3><button class="icon-btn" data-action="modal-close">✕</button></div>
+  <div class="modal-body">
+    <label class="field-label">Name</label>
+    <input class="text-input" id="editmember-name" data-action="field-input" data-field="name" value="${escapeHtml(state.modalData.name||'')}">
+    <label class="field-label">Code <span class="field-hint">— what they type in to check in</span></label>
+    <input class="text-input code-input" maxlength="4" inputmode="numeric" id="editmember-code" data-action="field-input" data-field="code" value="${escapeHtml(state.modalData.code||'')}">
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-ghost" data-action="modal-close">Cancel</button>
+    <button class="btn btn-primary" data-action="confirm-editmember">Save</button>
+  </div>`;
+}
 function modalRename(){
   return `
   <div class="modal-head"><h3>Rename Player</h3><button class="icon-btn" data-action="modal-close">✕</button></div>
@@ -1929,6 +1967,8 @@ function onClick(e){
     case 'back-to-group': backToGroupFromGame(); break;
     case 'open-addmember': openModal('addmember',{}); break;
     case 'confirm-addmember': confirmAddMember(); break;
+    case 'open-editmember': openModal('editmember',{memberId: t.dataset.member}); break;
+    case 'confirm-editmember': confirmEditMember(); break;
     case 'copy-season-summary': copySeasonSummary(); break;
     case 'refresh-group-games': refreshGroupGames(); break;
     case 'addplayer-mode': state.modalData.mode = t.dataset.mode; render(); break;
