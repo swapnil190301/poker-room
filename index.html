@@ -400,11 +400,28 @@ a, .link-btn{ background:none; border:none; color: var(--brass-light); font-size
 
 .confetti-canvas{ position:fixed; inset:0; pointer-events:none; z-index:9999; }
 
+/* ============ Group / Season ============ */
+.group-card-grid{ display:flex; flex-direction:column; gap:16px; }
+.member-code{ font-family: var(--font-mono); background: rgba(0,0,0,0.22); border:1px solid var(--line); border-radius:8px; padding:4px 8px; font-size:0.82rem; color: var(--brass-light); letter-spacing:0.08em; margin-left:auto; }
+.gameday-row{ display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line-soft); cursor:pointer; background:none; border:none; width:100%; text-align:left; color: var(--ivory); font-family:inherit; font-size:0.9rem; }
+.gameday-row:last-child{ border-bottom:none; }
+.gameday-row:hover{ background: var(--panel-2); }
+.gd-num{ width:28px; height:28px; border-radius:50%; background: var(--panel-2); display:flex; align-items:center; justify-content:center; font-size:0.76rem; font-weight:600; color: var(--brass-light); flex-shrink:0; }
+.gd-info{ flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
+.gd-name{ font-weight:600; font-size:0.88rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gd-meta{ font-size:0.75rem; color: var(--ivory-dim); }
+.gd-status{ font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; padding:3px 9px; border-radius:999px; flex-shrink:0; font-weight:600; }
+.gd-status.live{ background: rgba(226,102,90,0.18); color: var(--loss); }
+.gd-status.done{ background: rgba(86,183,136,0.18); color: var(--profit); }
+.gd-chevron{ color: var(--ivory-dim); flex-shrink:0; }
+
 /* ============ Scale up for tablets / desktop ============ */
 @media (min-width: 721px){
   .landing{ padding:32px 20px; }
   .landing-cards{ grid-template-columns:1fr 1fr; gap:20px; }
   .landing-card{ padding:26px; }
+  .landing-card.wide{ grid-column: 1 / -1; }
+  .group-card-grid{ display:grid; grid-template-columns:1fr 1fr; gap:20px; }
   .brand h1{ font-size:2.6rem; }
   .tagline{ margin:10px 0 40px; font-size:1.02rem; }
 
@@ -489,9 +506,11 @@ const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /* ============================= STATE ============================= */
 let state = {
-  view: 'landing', // landing | game | endgame | results
+  view: 'landing', // landing | game | endgame | results | group
   code: null,
   game: null,
+  group: null,           // currently loaded group (season) doc — also attached to a game for check-in lookups
+  groupGamesCache: null, // array of loaded room objects for the open group's game days
   modal: null,
   modalData: { newChipValues: {...DEFAULT_CHIP_VALUES}, newBuyInRecipe: {...DEFAULT_BUY_IN_RECIPE} },
   toast: null,
@@ -502,6 +521,12 @@ let state = {
 /* ============================= UTILS ============================= */
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function genRoomCode(){ let c=''; for(let i=0;i<4;i++) c += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return c; }
+function genMemberCode(existing){
+  existing = existing || [];
+  let code;
+  do{ code = String(Math.floor(1000+Math.random()*9000)); }while(existing.includes(code));
+  return code;
+}
 function extractRoomId(input){
   input = (input||'').trim().toUpperCase();
   const match = input.match(new RegExp(`[${CODE_CHARS}]{4}`));
@@ -552,8 +577,8 @@ function fmtAgo(ts){
   const hrs = Math.floor(mins/60);
   return `${hrs}h ${mins%60}m ago`;
 }
-function computeSettlements(g){
-  const rows = activePlayers(g).map(p=>({id:p.id, name:p.name, amt: Math.round(pnl(g,p.id))}));
+function computeSettlementsFromRows(rows){
+  // rows: [{name, amt}] — a positive amt is owed money, negative amt owes money
   const creditors = rows.filter(r=>r.amt>0).map(r=>({...r})).sort((a,b)=>b.amt-a.amt);
   const debtors = rows.filter(r=>r.amt<0).map(r=>({...r, amt:-r.amt})).sort((a,b)=>b.amt-a.amt);
   const settlements = [];
@@ -567,6 +592,25 @@ function computeSettlements(g){
     if(c.amt<=0) j++;
   }
   return settlements;
+}
+function computeSettlements(g){
+  const rows = activePlayers(g).map(p=>({name:p.name, amt: Math.round(pnl(g,p.id))}));
+  return computeSettlementsFromRows(rows);
+}
+/* ============ Group (season) aggregation ============ */
+function groupFinishedGames(games){ return (games||[]).filter(g=>g && g.ended); }
+function aggregateGroupStats(group, games){
+  const totals = {};
+  (group.members||[]).forEach(m=>{ totals[m.id] = { id:m.id, name:m.name, color:m.color, totalPnl:0, gamesPlayed:0 }; });
+  groupFinishedGames(games).forEach(g=>{
+    activePlayers(g).forEach(p=>{
+      if(!p.memberId || !totals[p.memberId]) return;
+      const t = totals[p.memberId];
+      t.totalPnl += pnl(g, p.id);
+      t.gamesPlayed += 1;
+    });
+  });
+  return Object.values(totals).filter(t=>t.gamesPlayed>0).sort((a,b)=>b.totalPnl-a.totalPnl);
 }
 
 /* Firebase's Realtime Database silently drops empty arrays/objects on write —
@@ -582,6 +626,13 @@ function normalizeGame(g){
   g.chipValues = g.chipValues || {...DEFAULT_CHIP_VALUES};
   g.buyInRecipe = g.buyInRecipe || {...DEFAULT_BUY_IN_RECIPE};
   return g;
+}
+function normalizeGroup(grp){
+  if(!grp) return grp;
+  grp.members = Array.isArray(grp.members) ? grp.members : (grp.members ? Object.values(grp.members) : []);
+  grp.gameDays = Array.isArray(grp.gameDays) ? grp.gameDays : (grp.gameDays ? Object.values(grp.gameDays) : []);
+  grp.gameDays.sort((a,b)=>(a.day||0)-(b.day||0));
+  return grp;
 }
 
 /* ============================= STORAGE (Firebase Realtime Database) ============================= */
@@ -611,6 +662,7 @@ function applyRemoteUpdate(remote){
   normalizeGame(remote);
   if((remote.updatedAt||0) < (state.game?.updatedAt||0)) return;
   state.game = remote;
+  ensureGroupContext(remote);
   if(remote.ended) state.view = 'results';
   else if(state.view==='results') state.view = 'game';
   render();
@@ -622,6 +674,72 @@ function attachRoom(id){
 }
 function detachRoom(){
   if(roomRef){ roomRef.off('value', handleRemoteSnapshot); roomRef = null; }
+}
+function ensureGroupContext(g){
+  if(g && g.groupCode && (!state.group || state.group.code !== g.groupCode)) attachGroupRoom(g.groupCode);
+}
+
+/* ============================= STORAGE (Groups / Season) ============================= */
+let groupRef = null;
+let pendingRemoteGroupUpdate = null;
+async function loadGroup(code){
+  if(!code) return null;
+  const snap = await db.ref('groups/'+code).once('value');
+  return snap.exists() ? normalizeGroup(snap.val()) : null;
+}
+function handleRemoteGroupSnapshot(snapshot){
+  const remote = snapshot.val();
+  if(!remote) return;
+  normalizeGroup(remote);
+  if(state.modal){ pendingRemoteGroupUpdate = remote; return; }
+  applyRemoteGroupUpdate(remote);
+}
+function applyRemoteGroupUpdate(remote){
+  normalizeGroup(remote);
+  if((remote.updatedAt||0) < (state.group?.updatedAt||0)) return;
+  state.group = remote;
+  render();
+}
+function attachGroupRoom(code){
+  detachGroupRoom();
+  groupRef = db.ref('groups/'+code);
+  groupRef.on('value', handleRemoteGroupSnapshot);
+}
+function detachGroupRoom(){
+  if(groupRef){ groupRef.off('value', handleRemoteGroupSnapshot); groupRef = null; }
+}
+function mergeGroups(remote, local){
+  if(!remote) return local;
+  const merged = { ...remote };
+  const remoteMemberIds = new Set(remote.members.map(m=>m.id));
+  const extraMembers = local.members.filter(m=>!remoteMemberIds.has(m.id));
+  merged.members = [...remote.members, ...extraMembers];
+  const remoteDayCodes = new Set(remote.gameDays.map(d=>d.code));
+  const extraDays = local.gameDays.filter(d=>!remoteDayCodes.has(d.code));
+  merged.gameDays = [...remote.gameDays, ...extraDays].sort((a,b)=>(a.day||0)-(b.day||0));
+  if((local.updatedAt||0) > (remote.updatedAt||0)) merged.name = local.name;
+  return merged;
+}
+async function mutateAndSaveGroup(mutator){
+  let remote = null;
+  try{
+    remote = await loadGroup(state.group.code);
+  }catch(e){
+    console.error('read before group mutate failed', e);
+    flashToast('Sync read issue (' + (e.code || e.message || 'unknown') + ') — saved locally');
+  }
+  const base = mergeGroups(remote, state.group);
+  mutator(base);
+  base.updatedAt = Date.now();
+  state.group = base;
+  render();
+  try{
+    await db.ref('groups/'+base.code).set(base);
+  }catch(e){
+    console.error('group save failed', e);
+    flashToast('Sync write failed: ' + (e.code || e.message || 'unknown error'));
+  }
+  return state.group;
 }
 
 /* Merge another device's saved state with ours: union actions & players by id
@@ -674,6 +792,7 @@ async function mutateAndSave(mutator){
 
 /* ============================= GAME ACTIONS ============================= */
 async function createGame(name, chipValues, buyInRecipe){
+  detachGroupRoom(); state.group = null; state.groupGamesCache = null;
   const game = {
     code: null,
     name: (name||'').trim() || 'Home Game',
@@ -709,12 +828,14 @@ async function createGame(name, chipValues, buyInRecipe){
 async function joinGame(input){
   const id = extractRoomId(input);
   if(!id){ flashToast('Paste the room ID first'); return; }
+  detachGroupRoom(); state.group = null; state.groupGamesCache = null;
   try{
     const g = await loadGame(id);
     if(!g){ flashToast('No room found with that ID'); return; }
     g.code = id;
     state.game = g; state.code = id;
     attachRoom(id);
+    ensureGroupContext(g);
     state.view = g.ended ? 'results' : 'game';
     render();
   }catch(e){
@@ -790,8 +911,184 @@ async function reopenGame(){
 }
 function backToLanding(){
   detachRoom();
-  state = { view:'landing', code:null, game:null, modal:null, modalData:{ newChipValues:{...DEFAULT_CHIP_VALUES}, newBuyInRecipe:{...DEFAULT_BUY_IN_RECIPE} }, toast:null, confettiPlayed:false, toastTimer:null };
+  detachGroupRoom();
+  state = { view:'landing', code:null, game:null, group:null, groupGamesCache:null, modal:null, modalData:{ newChipValues:{...DEFAULT_CHIP_VALUES}, newBuyInRecipe:{...DEFAULT_BUY_IN_RECIPE} }, toast:null, confettiPlayed:false, toastTimer:null };
   render();
+}
+
+/* ============================= GROUP (SEASON) ACTIONS ============================= */
+async function createGroup(name){
+  name = (name||'').trim();
+  if(!name){ flashToast('Give your group a name first'); return; }
+  const group = {
+    code: null,
+    name,
+    createdAt: Date.now(), updatedAt: Date.now(),
+    members: [],
+    gameDays: [],
+  };
+  try{
+    let id = null;
+    for(let attempt=0; attempt<6; attempt++){
+      const candidate = genRoomCode();
+      const snap = await db.ref('groups/'+candidate).once('value');
+      if(!snap.exists()){ id = candidate; break; }
+    }
+    if(!id) throw new Error('could not allocate a group code');
+    group.code = id;
+    await db.ref('groups/'+id).set(group);
+    detachRoom(); state.game = null;
+    state.group = group;
+    state.groupGamesCache = [];
+    attachGroupRoom(id);
+    state.view = 'group';
+    render();
+  }catch(e){
+    console.error(e);
+    flashToast('Could not create group: ' + (e.code || e.message || 'connection error'));
+  }
+}
+async function joinGroupByCode(input){
+  const id = extractRoomId(input);
+  if(!id){ flashToast('Paste the group code first'); return; }
+  try{
+    const grp = await loadGroup(id);
+    if(!grp){ flashToast('No group found with that code'); return; }
+    grp.code = id;
+    detachRoom(); state.game = null;
+    state.group = grp;
+    attachGroupRoom(id);
+    state.view = 'group';
+    render();
+    await refreshGroupGames();
+  }catch(e){
+    console.error(e);
+    flashToast('Could not join group: ' + (e.code || e.message || 'connection error'));
+  }
+}
+function openGroup(code){
+  detachRoom(); state.game = null;
+  loadGroup(code).then(grp=>{
+    if(!grp){ flashToast('No group found with that code'); backToLanding(); return; }
+    grp.code = code;
+    state.group = grp;
+    attachGroupRoom(code);
+    state.view = 'group';
+    render();
+    refreshGroupGames();
+  }).catch(e=>{
+    console.error(e);
+    flashToast('Could not load group: ' + (e.code || e.message || 'connection error'));
+  });
+}
+async function refreshGroupGames(){
+  if(!state.group) return;
+  const codes = (state.group.gameDays||[]).map(d=>d.code);
+  const games = await Promise.all(codes.map(c=>loadGame(c).catch(()=>null)));
+  state.groupGamesCache = games;
+  render();
+}
+async function addMember(name){
+  name = (name||'').trim();
+  if(!name) return;
+  let newCode = null;
+  await mutateAndSaveGroup(g=>{
+    const idx = g.members.length;
+    newCode = genMemberCode(g.members.map(m=>m.code));
+    g.members.push({ id: uid(), name, code: newCode, color: AVATAR_COLORS[idx % AVATAR_COLORS.length] });
+  });
+  flashToast(`${name} added — their code is ${newCode}`);
+}
+async function startGameDay(){
+  const grp = state.group;
+  if(!grp) return;
+  const nextDay = (grp.gameDays||[]).length + 1;
+  const prevGames = (state.groupGamesCache || []).filter(Boolean);
+  const lastGame = prevGames[prevGames.length-1];
+  const chipValues = (lastGame && lastGame.chipValues) || DEFAULT_CHIP_VALUES;
+  const buyInRecipe = (lastGame && lastGame.buyInRecipe) || DEFAULT_BUY_IN_RECIPE;
+  const game = {
+    code: null,
+    name: `${grp.name} — Day ${nextDay}`,
+    createdAt: Date.now(), updatedAt: Date.now(), endedAt: null, ended:false,
+    chipValues: {...chipValues}, buyInRecipe: {...buyInRecipe},
+    players: [], actions: [], finalChips: {}, liveChecks: {},
+    groupCode: grp.code, groupName: grp.name, groupDay: nextDay,
+  };
+  try{
+    let id = null;
+    for(let attempt=0; attempt<6; attempt++){
+      const candidate = genRoomCode();
+      const snap = await db.ref('rooms/'+candidate).once('value');
+      if(!snap.exists()){ id = candidate; break; }
+    }
+    if(!id) throw new Error('could not allocate a room code');
+    game.code = id;
+    await db.ref('rooms/'+id).set(game);
+    await mutateAndSaveGroup(g=>{ g.gameDays.push({ code:id, day:nextDay, addedAt: Date.now() }); });
+    state.game = game;
+    state.code = id;
+    attachRoom(id);
+    state.view = 'game';
+    render();
+  }catch(e){
+    console.error(e);
+    flashToast('Could not start game day: ' + (e.code || e.message || 'connection error'));
+  }
+}
+function openGroupGame(code){
+  loadGame(code).then(g=>{
+    if(!g){ flashToast('That game day could not be found'); return; }
+    g.code = code;
+    state.game = g;
+    attachRoom(code);
+    ensureGroupContext(g);
+    state.view = g.ended ? 'results' : 'game';
+    state.confettiPlayed = true; // skip confetti when revisiting an already-finished day
+    render();
+  }).catch(e=>{
+    console.error(e);
+    flashToast('Could not open that game day: ' + (e.code || e.message || 'connection error'));
+  });
+}
+function backToGroupFromGame(){
+  const code = state.game && state.game.groupCode;
+  detachRoom();
+  state.game = null;
+  if(code) openGroup(code); else backToLanding();
+}
+async function checkInWithCode(code){
+  code = (code||'').trim();
+  if(!code){ flashToast('Enter your code'); return false; }
+  const grp = state.group;
+  if(!grp){ flashToast('Group not loaded yet — try again in a moment'); return false; }
+  const member = grp.members.find(m=>m.code===code);
+  if(!member){ flashToast('Code not recognized'); return false; }
+  const already = activePlayers(state.game).find(p=>p.memberId===member.id);
+  if(already){ flashToast(`${member.name} is already checked in`); return false; }
+  await mutateAndSave(g=>{
+    g.players.push({ id: uid(), name: member.name, color: member.color, removed:false, memberId: member.id });
+  });
+  flashToast(`${member.name} checked in`);
+  return true;
+}
+function copyGroupCode(){
+  const code = state.group.code;
+  if(navigator.clipboard) navigator.clipboard.writeText(code).then(()=>flashToast('Group code copied')).catch(()=>flashToast(code));
+  else flashToast(code);
+}
+function copySeasonSummary(){
+  const grp = state.group;
+  const games = groupFinishedGames(state.groupGamesCache);
+  const totals = aggregateGroupStats(grp, state.groupGamesCache);
+  const medals = ['🥇','🥈','🥉'];
+  const lines = [`🃏 ANTE — ${grp.name}`, `${games.length} game day${games.length!==1?'s':''} played`, ''];
+  totals.forEach((t,i)=> lines.push(`${medals[i]||'  '} ${t.name}  ${fmtPnl(Math.round(t.totalPnl))}`));
+  const settlements = computeSettlementsFromRows(totals.map(t=>({name:t.name, amt:Math.round(t.totalPnl)})));
+  if(settlements.length){ lines.push('', 'Settle up:'); settlements.forEach(s=> lines.push(`${s.from} pays ${s.to} ${fmt(s.amount)}`)); }
+  const text = lines.join('\n');
+  if(navigator.clipboard) navigator.clipboard.writeText(text).then(()=>flashToast('Copied — paste it into Splitwise')).catch(()=>flashToast('Could not copy'));
+  else flashToast('Could not copy');
 }
 
 /* ============================= MODAL LIFECYCLE ============================= */
@@ -800,7 +1097,8 @@ function openModal(type, data){
   if(type==='buyin') state.modalData = { chips: {...recipeOf(state.game)} };
   else if(type==='transfer') state.modalData = { mode:'buyins', qty:1, chips: emptyChips(), fromId: data.fromId||null, toId:null };
   else if(type==='settings') state.modalData = { chipValues: {...state.game.chipValues}, buyInRecipe: {...recipeOf(state.game)} };
-  else if(type==='addplayer') state.modalData = { name:'' };
+  else if(type==='addplayer') state.modalData = { name:'', code:'', mode: (state.game && state.game.groupCode) ? 'code' : 'guest' };
+  else if(type==='addmember') state.modalData = { name:'' };
   else if(type==='rename') state.modalData = { name: data.currentName||'' };
   else if(type==='playermenu') state.modalData = {};
   else if(type==='share') state.modalData = {};
@@ -812,6 +1110,10 @@ function openModal(type, data){
 }
 function closeModal(){
   state.modal=null; state.modalData={};
+  if(pendingRemoteGroupUpdate){
+    const remoteGrp = pendingRemoteGroupUpdate; pendingRemoteGroupUpdate = null;
+    applyRemoteGroupUpdate(remoteGrp);
+  }
   if(pendingRemoteUpdate){
     const remote = pendingRemoteUpdate; pendingRemoteUpdate = null;
     applyRemoteUpdate(remote);
@@ -838,7 +1140,18 @@ async function confirmTransfer(){
   closeModal();
 }
 async function confirmSettings(){ await applySettings(state.modalData.chipValues, state.modalData.buyInRecipe); closeModal(); }
-async function confirmAddPlayer(){ await addPlayer(state.modalData.name); closeModal(); }
+async function confirmAddPlayer(){
+  const grouped = !!(state.game && state.game.groupCode);
+  const mode = state.modalData.mode || (grouped ? 'code' : 'guest');
+  if(grouped && mode!=='guest'){
+    const ok = await checkInWithCode(state.modalData.code);
+    if(ok) closeModal();
+  } else {
+    await addPlayer(state.modalData.name);
+    closeModal();
+  }
+}
+async function confirmAddMember(){ await addMember(state.modalData.name); closeModal(); }
 async function confirmRename(){ await renamePlayer(state.modal.playerId, state.modalData.name); closeModal(); }
 async function confirmLiveCheck(){
   const { playerId } = state.modal;
@@ -897,6 +1210,7 @@ function renderHTML(){
   else if(state.view==='game') html = viewGame();
   else if(state.view==='endgame') html = viewEndgame();
   else if(state.view==='results') html = viewResults();
+  else if(state.view==='group') html = viewGroup();
   if(state.modal) html += renderModal();
   if(state.toast) html += `<div class="toast">${escapeHtml(state.toast)}</div>`;
   return html;
@@ -946,6 +1260,22 @@ function viewLanding(){
           <input class="text-input code-input" maxlength="4" placeholder="e.g. 7XQK" data-action="field-input" data-field="joinCode" value="${escapeHtml(state.modalData.joinCode||'')}">
           <button class="btn btn-secondary btn-block" data-action="join-game">Join Room</button>
         </div>
+        <div class="landing-card wide">
+          <h2>Season Group</h2>
+          <p class="card-sub">Playing the same crew night after night? Track every game day under one group, with combined standings and a single settle-up at the end.</p>
+          <div class="group-card-grid">
+            <div>
+              <label class="field-label">Group name</label>
+              <input class="text-input" placeholder="e.g. Friday Regulars" data-action="field-input" data-field="newGroupName" value="${escapeHtml(state.modalData.newGroupName||'')}">
+              <button class="btn btn-primary btn-block" data-action="create-group">Create Group</button>
+            </div>
+            <div>
+              <label class="field-label">Group code</label>
+              <input class="text-input code-input" maxlength="4" placeholder="e.g. 9KPL" data-action="field-input" data-field="joinGroupCode" value="${escapeHtml(state.modalData.joinGroupCode||'')}">
+              <button class="btn btn-secondary btn-block" data-action="join-group">Join Group</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>`;
@@ -961,6 +1291,7 @@ function viewGame(){
     <header class="rail">
       <div class="rail-left">
         <div class="brand-sm"><span class="brand-mark">♠</span>ANTE</div>
+        ${g.groupCode ? `<button class="link-btn" data-action="back-to-group" title="Back to group">← ${escapeHtml(g.groupName||'Group')}</button>` : ''}
         <div class="game-name">${escapeHtml(g.name)}</div>
       </div>
       <div class="rail-mid">
@@ -1052,7 +1383,7 @@ function viewEndgame(){
   return `
   <div class="endgame-view">
     <header class="rail">
-      <div class="rail-left"><div class="brand-sm"><span class="brand-mark">♠</span>ANTE</div><div class="game-name">${escapeHtml(g.name)} · Final Count</div></div>
+      <div class="rail-left"><div class="brand-sm"><span class="brand-mark">♠</span>ANTE</div>${g.groupCode?`<button class="link-btn" data-action="back-to-group" title="Back to group">← ${escapeHtml(g.groupName||'Group')}</button>`:''}<div class="game-name">${escapeHtml(g.name)} · Final Count</div></div>
       <div class="rail-right"><button class="btn btn-ghost" data-action="back-to-game">Back to table</button></div>
     </header>
     <main class="endgame-body">
@@ -1086,6 +1417,7 @@ function viewResults(){
     <div class="results-hero">
       <div class="brand-sm center"><span class="brand-mark">♠</span>ANTE</div>
       <h2>${escapeHtml(g.name)}</h2>
+      ${g.groupCode ? `<p class="results-sub"><button class="link-btn" data-action="back-to-group">← Back to ${escapeHtml(g.groupName||'Group')}</button></p>` : ''}
       <p class="results-sub">${duration} played · ${fmt(totalBuyins(g))} in play${totalCashedOut(g)>0?` · ${fmt(totalCashedOut(g))} cashed out along the way`:''}</p>
     </div>
     <div class="podium">
@@ -1112,9 +1444,99 @@ function viewResults(){
     </div>
     <div class="results-actions">
       <button class="btn btn-outline" data-action="copy-results">Copy Results</button>
-      <button class="btn btn-primary" data-action="new-game">New Game</button>
+      ${g.groupCode
+        ? `<button class="btn btn-primary" data-action="back-to-group">Back to Group</button>`
+        : `<button class="btn btn-primary" data-action="new-game">New Game</button>`}
     </div>
     <button class="link-btn center-link" data-action="reopen-game">Made a mistake? Reopen game</button>
+  </div>`;
+}
+
+function viewGroup(){
+  const grp = state.group;
+  if(!grp){
+    return `<div class="landing"><div class="landing-inner"><p class="empty-note">Loading group…</p></div></div>`;
+  }
+  const games = state.groupGamesCache || [];
+  const finished = groupFinishedGames(games);
+  const totals = aggregateGroupStats(grp, games);
+  const settlements = computeSettlementsFromRows(totals.map(t=>({name:t.name, amt:Math.round(t.totalPnl)})));
+  const totalPot = finished.reduce((s,g)=> s+totalBuyins(g), 0);
+  return `
+  <div class="results-view">
+    <div class="results-hero">
+      <div class="brand-sm center"><span class="brand-mark">♠</span>ANTE</div>
+      <h2>${escapeHtml(grp.name)}</h2>
+      <p class="results-sub"><button class="code-badge" data-action="copy-group-code" title="Copy group code">${grp.code} <span class="copy-ico">⧉</span></button></p>
+      <p class="results-sub">${finished.length} game${finished.length!==1?'s':''} played${totalPot>0?` · ${fmt(totalPot)} total in play`:''}</p>
+    </div>
+
+    <div class="leaderboard">
+      <h3>Roster</h3>
+      ${(grp.members||[]).length===0
+        ? `<div class="empty-note">No members yet. Add everyone who plays, and hand out their codes so they can check in on any game day.</div>`
+        : grp.members.map(m=>`
+          <div class="lb-row">
+            ${avatar({name:m.name,color:m.color},32)}
+            <span class="lb-name">${escapeHtml(m.name)}</span>
+            <span class="lb-sub">Their code:</span>
+            <span class="member-code mono">${escapeHtml(m.code)}</span>
+          </div>`).join('')}
+      <div style="padding:12px 16px 4px;"><button class="link-btn" data-action="open-addmember">+ Add member</button></div>
+    </div>
+
+    <button class="btn btn-primary btn-block btn-lg" data-action="start-game-day" style="margin-bottom:28px;">Start Game Day ${(grp.gameDays||[]).length+1}</button>
+
+    <div class="leaderboard">
+      <h3>Season Standings</h3>
+      ${totals.length===0
+        ? `<div class="empty-note">Standings show up here once a game day is finished.</div>`
+        : totals.map((t,i)=>`
+          <div class="lb-row">
+            <span class="lb-rank">${i+1}</span>
+            ${avatar({name:t.name,color:t.color},32)}
+            <span class="lb-name">${escapeHtml(t.name)}</span>
+            <span class="lb-sub">${t.gamesPlayed} game${t.gamesPlayed!==1?'s':''}</span>
+            <span class="lb-pnl ${t.totalPnl>0?'profit':t.totalPnl<0?'loss':''} mono">${fmtPnl(Math.round(t.totalPnl))}</span>
+          </div>`).join('')}
+    </div>
+
+    <div class="settleup">
+      <h3>Season Settle-Up</h3>
+      ${settlements.length===0
+        ? `<div class="empty-note">Nothing to settle yet.</div>`
+        : settlements.map(s=>`<div class="settle-row"><span>${escapeHtml(s.from)}</span><span class="settle-arrow">pays</span><span>${escapeHtml(s.to)}</span><span class="mono settle-amt">${fmt(s.amount)}</span></div>`).join('')}
+    </div>
+    ${settlements.length>0 ? `
+    <div class="results-actions">
+      <button class="btn btn-outline" data-action="copy-season-summary">Copy Season Summary for Splitwise</button>
+    </div>` : ''}
+
+    <div class="ledger">
+      <div class="ledger-head"><h3>Game Days</h3><button class="link-btn" data-action="refresh-group-games">Refresh</button></div>
+      <div class="ledger-list">
+        ${(grp.gameDays||[]).length===0
+          ? `<div class="empty-note">No game days yet — tap "Start Game Day" above to begin.</div>`
+          : grp.gameDays.slice().reverse().map(d=>{
+              const gm = games.find(x=>x && x.code===d.code);
+              const status = gm ? (gm.ended?'done':'live') : 'live';
+              const label = gm ? (gm.ended?'Final':'In progress') : 'Loading…';
+              const dateStr = gm ? new Date(gm.createdAt).toLocaleDateString('en-IN',{day:'numeric',month:'short'}) : '';
+              return `
+              <button type="button" class="gameday-row" data-action="open-groupgame" data-code="${d.code}">
+                <span class="gd-num mono">${d.day}</span>
+                <span class="gd-info">
+                  <span class="gd-name">${escapeHtml(gm ? gm.name : ('Day '+d.day))}</span>
+                  <span class="gd-meta">${dateStr}</span>
+                </span>
+                <span class="gd-status ${status}">${label}</span>
+                <span class="gd-chevron">›</span>
+              </button>`;
+            }).join('')}
+      </div>
+    </div>
+
+    <button class="link-btn center-link" data-action="new-game">Back to Home</button>
   </div>`;
 }
 
@@ -1146,6 +1568,7 @@ function renderModal(){
   else if(m.type==='playermenu') inner = modalPlayerMenu();
   else if(m.type==='share') inner = modalShare();
   else if(m.type==='livecheck') inner = modalLiveCheck();
+  else if(m.type==='addmember') inner = modalAddMember();
   return `<div class="overlay"><div class="modal">${inner}</div></div>`;
 }
 function modalBuyin(){
@@ -1324,15 +1747,53 @@ function modalPlayerMenu(){
   </div>`;
 }
 function modalAddPlayer(){
+  const grouped = !!(state.game && state.game.groupCode);
+  if(!grouped){
+    return `
+    <div class="modal-head"><h3>Add Player</h3><button class="icon-btn" data-action="modal-close">✕</button></div>
+    <div class="modal-body">
+      <label class="field-label">Name</label>
+      <input class="text-input" id="addplayer-name" data-action="field-input" data-field="name" value="${escapeHtml(state.modalData.name||'')}" placeholder="e.g. Rohan">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" data-action="modal-close">Cancel</button>
+      <button class="btn btn-primary" data-action="confirm-addplayer">Add to Table</button>
+    </div>`;
+  }
+  const mode = state.modalData.mode || 'code';
   return `
   <div class="modal-head"><h3>Add Player</h3><button class="icon-btn" data-action="modal-close">✕</button></div>
   <div class="modal-body">
-    <label class="field-label">Name</label>
-    <input class="text-input" id="addplayer-name" data-action="field-input" data-field="name" value="${escapeHtml(state.modalData.name||'')}" placeholder="e.g. Rohan">
+    <div class="seg-control">
+      <button type="button" class="seg-btn ${mode!=='guest'?'active':''}" data-action="addplayer-mode" data-mode="code">Group member</button>
+      <button type="button" class="seg-btn ${mode==='guest'?'active':''}" data-action="addplayer-mode" data-mode="guest">Guest</button>
+    </div>
+    ${mode==='guest' ? `
+      <label class="field-label">Name</label>
+      <input class="text-input" id="addplayer-name" data-action="field-input" data-field="name" value="${escapeHtml(state.modalData.name||'')}" placeholder="e.g. Rohan">
+      <p class="field-hint" style="margin-top:8px;">Guests aren't on the roster, so they won't show up in the season standings.</p>
+    ` : `
+      <label class="field-label">Your code</label>
+      <input class="text-input code-input" maxlength="4" inputmode="numeric" id="addplayer-code" data-action="field-input" data-field="code" value="${escapeHtml(state.modalData.code||'')}" placeholder="e.g. 4821">
+      <p class="field-hint" style="margin-top:8px;">Don't have a code yet? Ask whoever runs ${escapeHtml(state.game.groupName||'the group')}.</p>
+    `}
   </div>
   <div class="modal-actions">
     <button class="btn btn-ghost" data-action="modal-close">Cancel</button>
     <button class="btn btn-primary" data-action="confirm-addplayer">Add to Table</button>
+  </div>`;
+}
+function modalAddMember(){
+  return `
+  <div class="modal-head"><h3>Add Member</h3><button class="icon-btn" data-action="modal-close">✕</button></div>
+  <div class="modal-body">
+    <label class="field-label">Name</label>
+    <input class="text-input" id="addmember-name" data-action="field-input" data-field="name" value="${escapeHtml(state.modalData.name||'')}" placeholder="e.g. Priya">
+    <p class="field-hint" style="margin-top:10px;">We'll generate them a personal code. Share it with them so they can check in on any game day.</p>
+  </div>
+  <div class="modal-actions">
+    <button class="btn btn-ghost" data-action="modal-close">Cancel</button>
+    <button class="btn btn-primary" data-action="confirm-addmember">Add Member</button>
   </div>`;
 }
 function modalRename(){
@@ -1456,6 +1917,22 @@ function onClick(e){
     }
     case 'copy-code': copyCode(); break;
     case 'copy-invite': copyInvite(); break;
+    case 'create-group': createGroup(state.modalData.newGroupName); break;
+    case 'join-group': {
+      const gcode = state.modalData.joinGroupCode || '';
+      if(!gcode.trim()){ flashToast('Paste the group code first'); return; }
+      joinGroupByCode(gcode);
+      break;
+    }
+    case 'start-game-day': startGameDay(); break;
+    case 'open-groupgame': openGroupGame(t.dataset.code); break;
+    case 'back-to-group': backToGroupFromGame(); break;
+    case 'open-addmember': openModal('addmember',{}); break;
+    case 'confirm-addmember': confirmAddMember(); break;
+    case 'copy-season-summary': copySeasonSummary(); break;
+    case 'refresh-group-games': refreshGroupGames(); break;
+    case 'addplayer-mode': state.modalData.mode = t.dataset.mode; render(); break;
+    case 'copy-group-code': copyGroupCode(); break;
     case 'open-share': openModal('share',{}); break;
     case 'open-settings': openModal('settings',{}); break;
     case 'confirm-settings': confirmSettings(); break;
